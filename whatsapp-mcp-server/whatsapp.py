@@ -8,7 +8,8 @@ import json
 import audio
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
-WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
+# Changed port from 8080 to 3333 to avoid conflict with Adminer
+WHATSAPP_API_BASE_URL = "http://localhost:3333/api"
 
 @dataclass
 class Message:
@@ -415,13 +416,27 @@ def search_contacts(query: str) -> List[Contact]:
         
         result = []
         for contact_data in contacts:
+            # Extract phone number from JID (user@server)
+            jid = contact_data[0]
+            phone_number = jid.split('@')[0] if '@' in jid else jid
+            
             contact = Contact(
-                phone_number=contact_data[0].split('@')[0],
-                name=contact_data[1],
-                jid=contact_data[0]
+                phone_number=phone_number,
+                name=contact_data[1] if contact_data[1] else phone_number, # Fallback to phone if name is null
+                jid=jid
             )
             result.append(contact)
             
+        # Log found contacts for debugging
+        print(f"DEBUG: Search query '{query}' returned {len(result)} contacts")
+        if len(result) == 0:
+             # Check total contacts in DB to verify sync status
+             cursor.execute("SELECT COUNT(*) FROM chats")
+             total = cursor.fetchone()[0]
+             print(f"DEBUG: Total chats in DB: {total}. If this is 0, history sync is not complete.")
+        else:
+             print(f"DEBUG: First match: {result[0]}")
+        
         return result
         
     except sqlite3.Error as e:
@@ -627,6 +642,11 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
+            
+        # Basic validation for JID or phone number
+        # Must contain digits or be a JID (contain @)
+        if not any(char.isdigit() for char in recipient) and '@' not in recipient:
+            return False, f"Invalid recipient format: '{recipient}'. Must be a phone number (e.g. 57300...) or JID (e.g. user@s.whatsapp.net)"
         
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
@@ -638,15 +658,19 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
         
         # Check if the request was successful
         if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
+            try:
+                result = response.json()
+                return result.get("success", False), result.get("message", "Unknown response")
+            except json.JSONDecodeError:
+                # Capture the exact response text for debugging
+                error_text = response.text[:500] # Limit length
+                print(f"DEBUG: Failed to decode JSON. Raw response: '{error_text}'")
+                return False, f"Error: Invalid JSON response from bridge. Status: {response.status_code}. Raw: {error_text}"
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
             
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
-    except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
